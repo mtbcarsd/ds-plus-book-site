@@ -75,3 +75,115 @@ FROM active_months AS a,
 WHERE (a.user_id * 3 + extract(month FROM a.month_start)::int * 17) % 80 > 0;
 
 DROP TABLE active_months;
+
+-- ============================================================================
+-- Схема rest_orders — сервис доставки ресторанного холдинга (теория и практика спринта).
+-- Структура и типы как в курсе (order_dt — timestamp, даты статусов и клиентов — строки), данные СИНТЕТИЧЕСКИЕ.
+
+CREATE SCHEMA rest_orders;
+
+CREATE TABLE rest_orders.cities (city_id int PRIMARY KEY, city_name varchar(128));
+INSERT INTO rest_orders.cities VALUES
+    (0, 'нет данных'), (1, 'Владивосток'), (2, 'Мурино'), (3, 'Барнаул'), (4, 'Красногорск'),
+    (5, 'Сочи'), (6, 'Саранск'), (7, 'Новосибирск'), (8, 'Калининград');  -- в Калининграде заказов нет
+
+CREATE TABLE rest_orders.statuses (status_id int PRIMARY KEY, status_name varchar);
+INSERT INTO rest_orders.statuses VALUES
+    (1, 'создан'), (2, 'оплачен'), (3, 'подтверждён рестораном'), (4, 'приготовлен'), (5, 'передан курьеру'), (6, 'доставлен');
+
+CREATE TABLE rest_orders.dishes (object_id bigint PRIMARY KEY, name varchar(128), spicy int, fish int, meat int);
+INSERT INTO rest_orders.dishes
+SELECT 1000 + i, n, s, f, m
+FROM (VALUES
+    (1, 'pishnie sirniki', 0, 0, 0), (2, 'letnij salat s fetoj i zelenju', 0, 0, 0),
+    (3, 'salat iz redki s govjadinoj i karamelizovannim lukom', 0, 0, 1), (4, 'tom yam s krevetkami', 1, 1, 0),
+    (5, 'pad thai s kuricej', 1, 0, 1), (6, 'losos na grile', 0, 1, 0), (7, 'chili con carne', 1, 0, 1),
+    (8, 'borsch s pampushkami', 0, 0, 1), (9, 'sushi set filadelfija', 0, 1, 0), (10, 'shawarma ostraja', 1, 0, 1),
+    (11, 'grecheskij salat', 0, 0, 0), (12, 'pelmeni domashnie', 0, 0, 1), (13, 'ramen s govjadinoj', 1, 0, 1),
+    (14, 'treska v kljare', 0, 1, 0), (15, 'ovoschnoe ragu', 0, 0, 0), (16, 'kurinye krylyshki baffalo', 1, 0, 1),
+    (17, 'paella s moreproduktami', 0, 1, 1), (18, 'kesadilja s govjadinoj', 1, 0, 1), (19, 'syrnyj sup', 0, 0, 0),
+    (20, 'tartar iz tunca', 1, 1, 0), (21, 'limonad domashnij', 0, 0, 0), (22, 'chizkejk n''ju-jork', 0, 0, 0)
+) AS d(i, n, s, f, m);
+
+CREATE TABLE rest_orders.dishes_prices (
+    dishes_id bigint REFERENCES rest_orders.dishes (object_id),
+    price numeric(14, 2), date_begin timestamptz, date_end timestamptz
+);
+
+CREATE TABLE rest_orders.users (
+    user_id uuid PRIMARY KEY, first_name varchar, last_name varchar, city_id int,
+    gender varchar, birth_date varchar, registration_date varchar
+);
+
+CREATE TABLE rest_orders.orders (
+    order_id bigint PRIMARY KEY, order_dt timestamp, user_id uuid, device_type varchar, city_id int,
+    total_cost numeric(14, 2), discount numeric(14, 2), final_cost numeric(14, 2)
+);
+
+CREATE TABLE rest_orders.order_items (order_id bigint, item bigint, count bigint);
+CREATE TABLE rest_orders.order_statuses (order_id bigint, status_id int, status_dt varchar);
+
+SELECT setseed(0.31);
+
+-- Прайсы по полугодиям; последняя цена действует до сих пор (date_end IS NULL)
+INSERT INTO rest_orders.dishes_prices
+SELECT d.object_id,
+       round((150 + random() * 1500)::numeric, 2),
+       p.b, p.e
+FROM rest_orders.dishes AS d,
+     (VALUES ('2019-12-31 17:00+03'::timestamptz, '2020-06-29 17:00+03'::timestamptz),
+             ('2020-06-30 17:00+03', '2020-12-30 17:00+03'),
+             ('2020-12-31 17:00+03', '2021-06-29 17:00+03'),
+             ('2021-06-30 17:00+03', NULL)) AS p(b, e);
+-- немного пропусков в цене — для уроков про NULL и COALESCE
+UPDATE rest_orders.dishes_prices SET price = NULL WHERE dishes_id IN (1007, 1015) AND date_end IS NOT NULL;
+
+INSERT INTO rest_orders.users
+SELECT md5('user' || i)::uuid,
+       (ARRAY['Гелла', 'Влада', 'Зара', 'Ассоль', 'Людмила', 'Вениамин', 'Марфа', 'Авдей', 'Долорес', 'Аделина', 'Грета', 'Наталия'])[1 + i % 12],
+       (ARRAY['МУХАТАЕВА', 'ЦИРУНОВА', 'СЕБЕЙКИНА', 'КЕДРИНА', 'АДОА', 'БУРУМОВА', 'АЛЕКСЕЕВА', 'НЕУМОЙЧЕВА', 'ПЕРЕПАНОВА', 'ТОПЛОВА'])[1 + (i * 7) % 10],
+       i % 8,
+       CASE WHEN random() < 0.55 THEN 'female' ELSE 'male' END,
+       (date '1950-01-01' + floor(random() * 20000)::int)::text,
+       (date '2018-06-01' + floor(random() * 1100)::int)::text
+FROM generate_series(1, 300) AS i;
+
+INSERT INTO rest_orders.orders (order_id, order_dt, user_id, device_type, city_id, total_cost, discount)
+SELECT i,
+       date_trunc('second', timestamp '2019-12-25' + random() * interval '584 days'),
+       md5('user' || (1 + floor(random() * 260)::int))::uuid,   -- 40 клиентов без заказов
+       CASE WHEN random() < 0.6 THEN 'Mobile' ELSE 'Desktop' END,
+       NULL,
+       NULL,
+       CASE WHEN random() < 0.2 THEN round((0.01 + random() * 0.14)::numeric, 2) END
+FROM generate_series(1, 1500) AS i;
+UPDATE rest_orders.orders AS o SET city_id = u.city_id FROM rest_orders.users AS u WHERE u.user_id = o.user_id;
+-- у части заказов город доставки отличается от города регистрации
+UPDATE rest_orders.orders SET city_id = (city_id + 1) % 8 WHERE order_id % 17 = 0;
+
+INSERT INTO rest_orders.order_items
+SELECT o.order_id, 1001 + (o.order_id * 7 + k * 5) % 22, 1 + (o.order_id + k) % 3
+FROM rest_orders.orders AS o, generate_series(1, 1 + (o.order_id % 4)) AS k;
+
+-- Стоимость заказа = сумма по актуальным на момент заказа ценам
+UPDATE rest_orders.orders AS o
+SET total_cost = s.total
+FROM (SELECT oi.order_id, SUM(COALESCE(dp.price, 600) * oi.count) AS total
+      FROM rest_orders.order_items AS oi
+      JOIN rest_orders.orders AS o2 ON o2.order_id = oi.order_id
+      JOIN rest_orders.dishes_prices AS dp
+        ON dp.dishes_id = oi.item
+       AND o2.order_dt::timestamptz >= dp.date_begin
+       AND (dp.date_end IS NULL OR o2.order_dt::timestamptz < dp.date_end)
+      GROUP BY oi.order_id) AS s
+WHERE s.order_id = o.order_id;
+UPDATE rest_orders.orders SET total_cost = 1500 WHERE total_cost IS NULL;
+UPDATE rest_orders.orders SET final_cost = round(total_cost * (1 - COALESCE(discount, 0)), 2);
+
+-- Статусы: все заказы созданы, ~8% так и не оплачены, дальше цепочка обрывается случайно
+INSERT INTO rest_orders.order_statuses
+SELECT o.order_id, s,
+       to_char(o.order_dt::timestamp + (s - 1) * interval '11 minutes' + random() * interval '9 minutes', 'YYYY-MM-DD HH24:MI:SS')
+FROM rest_orders.orders AS o,
+     generate_series(1, 6) AS s
+WHERE s = 1 OR (o.order_id % 13 <> 0 AND s <= 3 + o.order_id % 4);

@@ -105,7 +105,7 @@ SELECT i,
             ELSE 'Исполнитель ' || chr(65 + ((i * 7) % 60) % 14) END,
        (ARRAY['pop', 'rock', 'jazz', 'dance', 'electronic', 'hiphop', 'classical', 'alternative'])[1 + ((i * 7) % 60) % 8],
        CASE WHEN random() < 0.68 THEN 'Москва' ELSE 'Санкт-Петербург' END,
-       (ARRAY['Monday', 'Wednesday', 'Friday'])[1 + floor(random() * 3)::int],
+       (ARRAY['понедельник', 'среда', 'пятница'])[1 + floor(random() * 3)::int],
        10 + floor(random() * 390)::int,
        CASE WHEN random() < 0.05 THEN 0 ELSE round(random()::numeric, 2) END
 FROM generate_series(1, 600) AS i;
