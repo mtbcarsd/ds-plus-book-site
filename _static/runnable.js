@@ -398,7 +398,23 @@ async def __run(code):
         `<a class="pipe-node${ok ? " pipe-done" : ""}${i === steps.length - 1 ? " pipe-final" : ""}" href="#ex-${esc(id)}">` +
         `<span class="pipe-mark">${ok ? "✓" : i + 1}</span>${esc(label)}</a>`;
     }).join("") + "</div>" +
-      `<div class="pipe-progress">Решено ${done} из ${steps.length}${done === steps.length ? " — запрос собран 🎉" : ""}</div>`;
+      `<div class="pipe-progress">Решено ${done} из ${steps.length}${done === steps.length ? " — запрос собран 🎉" : ""}` +
+      (done ? ' <button type="button" class="pipe-reset" title="Снять отметки ✓ у шагов этого пайплайна">↺ Сбросить прогресс</button>' : "") +
+      "</div>";
+    const btn = el.querySelector(".pipe-reset");
+    if (btn) {
+      // Двойное нажатие вместо confirm(): случайный клик ничего не стирает
+      btn.addEventListener("click", () => {
+        if (!btn.dataset.armed) {
+          btn.dataset.armed = "1";
+          btn.textContent = "Точно сбросить? Нажмите ещё раз";
+          setTimeout(() => { if (btn.isConnected) { delete btn.dataset.armed; btn.textContent = "↺ Сбросить прогресс"; } }, 4000);
+          return;
+        }
+        steps.forEach(([id]) => { try { localStorage.removeItem(solvedKey(id)); } catch { /* нечего удалять */ } });
+        window.dispatchEvent(new CustomEvent("exercise-solved", { detail: { id: null } }));
+      });
+    }
   }
   function initPipelines() {
     const all = document.querySelectorAll(".sql-pipeline[data-steps]");
