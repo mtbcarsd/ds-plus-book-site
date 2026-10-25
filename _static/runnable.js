@@ -157,6 +157,68 @@ async def __run(code):
     }
   }
 
+  // ------------------------------------------------------------ упражнения
+  // Блок с первой строкой «-- упражнение: id» получает кнопку «Проверить»: запрос пользователя и блок
+  // «-- решение: id» выполняются на одной базе, результаты сравниваются (порядок строк — если в решении ORDER BY).
+  const EXERCISE = /^\s*--\s*упражнение:\s*([\w-]+)/i;
+  const SOLUTION = /^\s*--\s*решение:\s*([\w-]+)/i;
+  const solutions = new Map();
+
+  function norm(v) {
+    if (v === null || v === undefined) return "NULL";
+    if (v instanceof Date) return v.toISOString();
+    if (typeof v === "number" || (typeof v === "string" && /^-?\d+(\.\d+)?(e[+-]?\d+)?$/i.test(v))) {
+      return String(Math.round(Number(v) * 1e4) / 1e4);   // real и numeric сравниваем с точностью 4 знака
+    }
+    return typeof v === "object" ? JSON.stringify(v) : String(v);
+  }
+
+  async function lastResult(db, code) {
+    const res = await db.exec(code);
+    const last = [...res].reverse().find((r) => r.fields && r.fields.length);
+    if (!last) throw new Error("Запрос ничего не вернул — нужен SELECT.");
+    const names = last.fields.map((f) => f.name);
+    return { names, rows: last.rows.map((r) => names.map((n) => norm(r[n]))) };
+  }
+
+  async function checkSql(id, code, out, status) {
+    const expected = solutions.get(id);
+    if (!expected) throw new Error("Для этого упражнения нет решения на странице.");
+    const { db } = await getPostgres(status);
+    status("Проверяю…");
+    const exp = await lastResult(db, expected);
+    let got;
+    try {
+      got = await lastResult(db, code);
+    } catch (e) {
+      out.innerHTML = `<div class="exercise-verdict exercise-bad">✗ Запрос с ошибкой</div><pre class="runnable-error">${esc(e.message || e)}</pre>`;
+      return;
+    }
+    const ordered = /order\s+by/i.test(expected.replace(/--.*$/gm, ""));
+    const key = (r) => JSON.stringify(r);
+    const a = ordered ? exp.rows : [...exp.rows].sort((x, y) => key(x).localeCompare(key(y)));
+    const b = ordered ? got.rows : [...got.rows].sort((x, y) => key(x).localeCompare(key(y)));
+    let verdict, ok = false;
+    if (exp.names.length !== got.names.length) {
+      verdict = `✗ Ожидалось столбцов: ${exp.names.length} (${exp.names.join(", ")}), у вас: ${got.names.length} (${got.names.join(", ")}).`;
+    } else if (a.length !== b.length) {
+      verdict = `✗ Ожидалось строк: ${a.length}, у вас: ${b.length}. Проверьте фильтры, группировку и LIMIT.`;
+    } else {
+      const i = a.findIndex((r, k) => key(r) !== key(b[k]));
+      if (i >= 0) {
+        verdict = `✗ Значения отличаются${ordered ? " (порядок строк тоже важен)" : ""}. Строка ${i + 1}: ожидалось ` +
+          `<code>${esc(a[i].join(" | "))}</code>, у вас <code>${esc(b[i].join(" | "))}</code>.`;
+      } else {
+        ok = true;
+        const sameNames = exp.names.every((n, k) => n.toLowerCase() === got.names[k].toLowerCase());
+        verdict = sameNames ? "✓ Верно!" :
+          `✓ Данные верные. Имена столбцов по условию: ${esc(exp.names.join(", "))}.`;
+      }
+    }
+    out.innerHTML = `<div class="exercise-verdict ${ok ? "exercise-ok" : "exercise-bad"}">${verdict}</div><div class="exercise-result"></div>`;
+    await runSql(code, out.querySelector(".exercise-result"), () => {});
+  }
+
   // ------------------------------------------------------------ UI
   const RUNNERS = { python: runPython, sql: runSql };
   const LABELS = { python: "Python", sql: "SQL · PostgreSQL" };
@@ -176,6 +238,11 @@ async def __run(code):
       `<button type="button" class="runnable-run">▶ Запустить</button>` +
       `<button type="button" class="runnable-reset" title="Вернуть исходный код">↺ Сбросить</button>` +
       `<span class="runnable-lang">${LABELS[lang]}</span>`;
+    const exercise = lang === "sql" && (pre.textContent.match(EXERCISE) || [])[1];
+    if (exercise) {
+      bar.querySelector(".runnable-run").insertAdjacentHTML("afterend",
+        '<button type="button" class="runnable-check" title="Сравнить результат с эталонным решением">✓ Проверить</button>');
+    }
     const out = document.createElement("div");
     out.className = "runnable-out";
     out.hidden = true;
@@ -195,6 +262,21 @@ async def __run(code):
       }
     };
     runBtn.addEventListener("click", run);
+    if (exercise) {
+      const checkBtn = bar.querySelector(".runnable-check");
+      checkBtn.addEventListener("click", async () => {
+        checkBtn.disabled = true;
+        out.hidden = false;
+        const status = (msg) => (out.innerHTML = `<span class="runnable-muted">${esc(msg)}</span>`);
+        try {
+          await checkSql(exercise, pre.innerText, out, status);
+        } catch (e) {
+          out.innerHTML = `<pre class="runnable-error">${esc(e.message || e)}</pre>`;
+        } finally {
+          checkBtn.disabled = false;
+        }
+      });
+    }
     bar.querySelector(".runnable-reset").addEventListener("click", () => {
       pre.innerHTML = original;
       out.hidden = true;
@@ -212,6 +294,12 @@ async def __run(code):
   }
 
   function init() {
+    document.querySelectorAll(BLOCKS.sql).forEach((b) => {
+      const pre = b.querySelector("pre");
+      // textContent, а не innerText: решение лежит в свёрнутом блоке, у скрытого элемента innerText пустой
+      const m = pre && pre.textContent.match(SOLUTION);
+      if (m) solutions.set(m[1], pre.textContent);
+    });
     for (const [lang, selector] of Object.entries(BLOCKS)) {
       document.querySelectorAll(selector).forEach((b) => b.closest("article") && setup(b, lang));
     }
