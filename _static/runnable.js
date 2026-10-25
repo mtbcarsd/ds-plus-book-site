@@ -164,6 +164,40 @@ async def __run(code):
   const SOLUTION = /^\s*--\s*решение:\s*([\w-]+)/i;
   const solutions = new Map();
 
+  // «-- блоки: имя=id, имя2=id2» — упражнение опирается на блоки из предыдущих упражнений. При запуске и проверке
+  // они подставляются в WITH из эталонных решений (ошибка в одном шаге не ломает следующий), а кнопка
+  // «Собрать из моих блоков» берёт решения пользователя, засчитанные проверкой.
+  const BLOCKS_LINE = /^\s*--\s*блоки:\s*(.+)$/im;
+  const SOLVED_PREFIX = "solved:";
+  function parseBlocks(source) {
+    const m = source.match(BLOCKS_LINE);
+    if (!m) return [];
+    return m[1].split(",").map((x) => x.split("=").map((y) => y.trim())).filter(([n, i]) => n && i);
+  }
+  const stripCode = (code) => code.replace(/^\s*--.*$/gm, "").trim().replace(/;\s*$/, "");
+  const indent = (code) => code.split("\n").map((l) => "    " + l).join("\n");
+  function withBlocks(code, blocks, pick) {
+    const body = stripCode(code);
+    if (!body) return code;   // пустая заготовка — подставлять не во что
+    // блоки, которые уже определены в самом запросе (например, после сборки), второй раз не подставляем
+    const todo = blocks.filter(([name]) => !new RegExp(`\\b${name}\\s+AS\\s*\\(`, "i").test(body));
+    if (!todo.length) return code;
+    const defs = todo.map(([name, id]) => {
+      const part = pick(id);
+      if (part == null) throw new Error(`Нет кода для блока ${name}.`);
+      return `${name} AS (\n${indent(stripCode(part))}\n)`;
+    });
+    const w = body.match(/^WITH\s+/i);
+    return "WITH " + defs.join(",\n") + (w ? ",\n" + body.slice(w[0].length) : "\n" + body);
+  }
+  const solvedKey = (id) => SOLVED_PREFIX + location.pathname + ":" + id;
+  const solvedCode = (id) => { try { return localStorage.getItem(solvedKey(id)); } catch { return null; } };
+  function markSolved(id, code) {
+    try { localStorage.setItem(solvedKey(id), code); } catch { /* без хранилища прогресс живёт до перезагрузки */ }
+    window.dispatchEvent(new CustomEvent("exercise-solved", { detail: { id } }));
+  }
+  const refPick = (id) => solutions.get(id);
+
   function norm(v) {
     if (v === null || v === undefined) return "NULL";
     if (v instanceof Date) return v.toISOString();
@@ -181,9 +215,11 @@ async def __run(code):
     return { names, rows: last.rows.map((r) => names.map((n) => norm(r[n]))) };
   }
 
-  async function checkSql(id, code, out, status) {
-    const expected = solutions.get(id);
-    if (!expected) throw new Error("Для этого упражнения нет решения на странице.");
+  async function checkSql(id, userCode, out, status, blocks = []) {
+    const solution = solutions.get(id);
+    if (!solution) throw new Error("Для этого упражнения нет решения на странице.");
+    const expected = withBlocks(solution, blocks, refPick);
+    const code = withBlocks(userCode, blocks, refPick);
     const { db } = await getPostgres(status);
     status("Проверяю…");
     const exp = await lastResult(db, expected);
@@ -210,6 +246,7 @@ async def __run(code):
           `<code>${esc(a[i].join(" | "))}</code>, у вас <code>${esc(b[i].join(" | "))}</code>.`;
       } else {
         ok = true;
+        markSolved(id, userCode);
         const sameNames = exp.names.every((n, k) => n.toLowerCase() === got.names[k].toLowerCase());
         verdict = sameNames ? "✓ Верно!" :
           `✓ Данные верные. Имена столбцов по условию: ${esc(exp.names.join(", "))}.`;
@@ -265,9 +302,12 @@ async def __run(code):
       `<span class="runnable-saved"${saved !== null ? "" : " hidden"}>сохранено</span>` +
       `<span class="runnable-lang">${LABELS[lang]}</span>`;
     const exercise = lang === "sql" && (source.match(EXERCISE) || [])[1];
+    const blocks = lang === "sql" ? parseBlocks(source) : [];
     if (exercise) {
+      block.id = "ex-" + exercise;
       bar.querySelector(".runnable-run").insertAdjacentHTML("afterend",
-        '<button type="button" class="runnable-check" title="Сравнить результат с эталонным решением">✓ Проверить</button>');
+        '<button type="button" class="runnable-check" title="Сравнить результат с эталонным решением">✓ Проверить</button>' +
+        (blocks.length ? '<button type="button" class="runnable-assemble" title="Подставить в WITH мои засчитанные блоки">🧩 Собрать из моих блоков</button>' : ""));
     }
     const out = document.createElement("div");
     out.className = "runnable-out";
@@ -280,7 +320,8 @@ async def __run(code):
       out.hidden = false;
       const status = (msg) => (out.innerHTML = `<span class="runnable-muted">${esc(msg)}</span>`);
       try {
-        await RUNNERS[lang](pre.innerText, out, status);
+        const code = lang === "sql" ? withBlocks(pre.innerText, blocks, refPick) : pre.innerText;
+        await RUNNERS[lang](code, out, status);
       } catch (e) {
         out.innerHTML = `<pre class="runnable-error">${esc(e.message || e)}</pre>`;
       } finally {
@@ -295,12 +336,25 @@ async def __run(code):
         out.hidden = false;
         const status = (msg) => (out.innerHTML = `<span class="runnable-muted">${esc(msg)}</span>`);
         try {
-          await checkSql(exercise, pre.innerText, out, status);
+          await checkSql(exercise, pre.innerText, out, status, blocks);
         } catch (e) {
           out.innerHTML = `<pre class="runnable-error">${esc(e.message || e)}</pre>`;
         } finally {
           checkBtn.disabled = false;
         }
+      });
+    }
+    const assembleBtn = bar.querySelector(".runnable-assemble");
+    if (assembleBtn) {
+      assembleBtn.addEventListener("click", () => {
+        out.hidden = false;
+        const missing = blocks.filter(([, id]) => solvedCode(id) == null).map(([name]) => name);
+        if (missing.length) {
+          out.innerHTML = `<div class="exercise-verdict exercise-bad">Сначала решите и проверьте блоки: ${esc(missing.join(", "))}.</div>`;
+          return;
+        }
+        pre.textContent = "-- Собрано из моих засчитанных блоков\n" + withBlocks(pre.innerText, blocks, solvedCode) + ";";
+        out.innerHTML = '<span class="runnable-muted">Готово: блоки подставлены в WITH. Запустите или проверьте весь запрос.</span>';
       });
     }
     const savedMark = bar.querySelector(".runnable-saved");
@@ -333,6 +387,25 @@ async def __run(code):
     });
   }
 
+  // ------------------------------------------------------------ пайплайн мини-проекта
+  // <div class="sql-pipeline" data-steps="id|подпись;id|подпись"></div> — шаги загораются по мере решения упражнений.
+  function renderPipeline(el) {
+    const steps = el.dataset.steps.split(";").map((x) => x.split("|").map((y) => y.trim()));
+    const done = steps.filter(([id]) => solvedCode(id) != null).length;
+    el.innerHTML = '<div class="pipe-row">' + steps.map(([id, label], i) => {
+      const ok = solvedCode(id) != null;
+      return (i ? '<span class="pipe-arrow">→</span>' : "") +
+        `<a class="pipe-node${ok ? " pipe-done" : ""}${i === steps.length - 1 ? " pipe-final" : ""}" href="#ex-${esc(id)}">` +
+        `<span class="pipe-mark">${ok ? "✓" : i + 1}</span>${esc(label)}</a>`;
+    }).join("") + "</div>" +
+      `<div class="pipe-progress">Решено ${done} из ${steps.length}${done === steps.length ? " — запрос собран 🎉" : ""}</div>`;
+  }
+  function initPipelines() {
+    const all = document.querySelectorAll(".sql-pipeline[data-steps]");
+    all.forEach(renderPipeline);
+    window.addEventListener("exercise-solved", () => all.forEach(renderPipeline));
+  }
+
   function init() {
     document.querySelectorAll(BLOCKS.sql).forEach((b) => {
       const pre = b.querySelector("pre");
@@ -343,6 +416,7 @@ async def __run(code):
     for (const [lang, selector] of Object.entries(BLOCKS)) {
       document.querySelectorAll(selector).forEach((b) => b.closest("article") && setup(b, lang));
     }
+    initPipelines();
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
   else init();
