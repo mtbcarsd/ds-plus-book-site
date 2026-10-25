@@ -109,3 +109,43 @@ SELECT i,
        10 + floor(random() * 390)::int,
        CASE WHEN random() < 0.05 THEN 0 ELSE round(random()::numeric, 2) END
 FROM generate_series(1, 600) AS i;
+
+-- ============================================================================
+-- coffee_orders — СИНТЕТИЧЕСКИЕ заказы сети кофеен для задач «на понимание» (не из курса).
+CREATE TABLE coffee_orders (
+    order_id   integer PRIMARY KEY,
+    order_date date,
+    branch     varchar,
+    drink      varchar,
+    size       varchar,        -- S, M, L
+    price      numeric(6, 2),  -- цена одной порции
+    qty        integer,        -- сколько порций в заказе
+    payment    varchar,        -- card / cash
+    is_loyalty boolean         -- участник программы лояльности
+);
+
+SELECT setseed(0.73);
+
+INSERT INTO coffee_orders
+SELECT i,
+       d,
+       b,
+       dr,
+       sz,
+       round((CASE dr WHEN 'эспрессо' THEN 140 WHEN 'американо' THEN 170 WHEN 'капучино' THEN 220
+                      WHEN 'латте' THEN 240 WHEN 'раф' THEN 280 WHEN 'какао' THEN 200 ELSE 120 END)
+             * (CASE sz WHEN 'S' THEN 1 WHEN 'M' THEN 1.25 ELSE 1.5 END), 2),
+       q,
+       pay,
+       loy
+FROM (
+    SELECT i,
+           date '2024-03-01' + floor(random() * 61)::int AS d,
+           (ARRAY['Арбат', 'Тверская', 'Невский', 'Садовая'])[1 + floor(random() * 4)::int] AS b,
+           (ARRAY['эспрессо', 'американо', 'капучино', 'латте', 'раф', 'какао', 'чай'])[1 + floor(random() * 7)::int] AS dr,
+           CASE WHEN random() < 0.35 THEN 'S' WHEN random() < 0.6 THEN 'M' ELSE 'L' END AS sz,
+           1 + (random() < 0.2)::int + (random() < 0.05)::int AS q,
+           CASE WHEN random() < 0.7 THEN 'card' ELSE 'cash' END AS pay,
+           random() < 0.4 AS loy
+    FROM generate_series(1, 400) AS i
+) AS g;
