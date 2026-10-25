@@ -219,6 +219,26 @@ async def __run(code):
     await runSql(code, out.querySelector(".exercise-result"), () => {});
   }
 
+  // ------------------------------------------------------------ сохранение правок
+  // Правки хранятся в localStorage этого браузера: ключ — страница + хеш исходного кода блока,
+  // поэтому сохранённое не «переезжает» на другой блок, если страницу дополнят.
+  const STORE_PREFIX = "runnable:";
+  function hash(s) {
+    let h = 5381;
+    for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+    return (h >>> 0).toString(36);
+  }
+  const storeKey = (source) => STORE_PREFIX + location.pathname + ":" + hash(source);
+  function loadSaved(key) {
+    try { return localStorage.getItem(key); } catch { return null; }
+  }
+  function saveCode(key, code) {
+    try { localStorage.setItem(key, code); return true; } catch { return false; }
+  }
+  function dropSaved(key) {
+    try { localStorage.removeItem(key); } catch { /* хранилище недоступно — нечего удалять */ }
+  }
+
   // ------------------------------------------------------------ UI
   const RUNNERS = { python: runPython, sql: runSql };
   const LABELS = { python: "Python", sql: "SQL · PostgreSQL" };
@@ -228,17 +248,23 @@ async def __run(code):
     if (!pre || block.dataset.runnable) return;
     block.dataset.runnable = lang;
     const original = pre.innerHTML;
+    const source = pre.textContent;   // исходный код: по нему ключ хранилища и признак упражнения
+    const key = storeKey(source);
+    const saved = loadSaved(key);
+    if (saved !== null) pre.textContent = saved;
     pre.contentEditable = "plaintext-only";
     pre.spellcheck = false;
-    pre.title = "Код можно редактировать. Ctrl+Enter — запустить";
+    pre.title = "Код можно редактировать. Ctrl+Enter — запустить, Ctrl+S — сохранить";
 
     const bar = document.createElement("div");
     bar.className = "runnable-bar";
     bar.innerHTML =
       `<button type="button" class="runnable-run">▶ Запустить</button>` +
-      `<button type="button" class="runnable-reset" title="Вернуть исходный код">↺ Сбросить</button>` +
+      `<button type="button" class="runnable-save" title="Запомнить код в этом браузере">💾 Сохранить</button>` +
+      `<button type="button" class="runnable-reset" title="Вернуть исходный код и удалить сохранённое">↺ Сбросить</button>` +
+      `<span class="runnable-saved"${saved !== null ? "" : " hidden"}>сохранено</span>` +
       `<span class="runnable-lang">${LABELS[lang]}</span>`;
-    const exercise = lang === "sql" && (pre.textContent.match(EXERCISE) || [])[1];
+    const exercise = lang === "sql" && (source.match(EXERCISE) || [])[1];
     if (exercise) {
       bar.querySelector(".runnable-run").insertAdjacentHTML("afterend",
         '<button type="button" class="runnable-check" title="Сравнить результат с эталонным решением">✓ Проверить</button>');
@@ -277,13 +303,27 @@ async def __run(code):
         }
       });
     }
+    const savedMark = bar.querySelector(".runnable-saved");
+    bar.querySelector(".runnable-save").addEventListener("click", () => {
+      const ok = saveCode(key, pre.innerText);
+      savedMark.textContent = ok ? "сохранено" : "браузер не даёт сохранять";
+      savedMark.hidden = false;
+    });
+    pre.addEventListener("input", () => {
+      if (!savedMark.hidden && savedMark.textContent === "сохранено") savedMark.textContent = "есть несохранённые правки";
+    });
     bar.querySelector(".runnable-reset").addEventListener("click", () => {
+      dropSaved(key);
+      savedMark.hidden = true;
       pre.innerHTML = original;
       out.hidden = true;
       out.innerHTML = "";
     });
     pre.addEventListener("keydown", (e) => {
-      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        bar.querySelector(".runnable-save").click();
+      } else if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
         e.preventDefault();
         run();
       } else if (e.key === "Tab") {
