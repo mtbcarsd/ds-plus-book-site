@@ -422,7 +422,112 @@ async def __run(code):
     window.addEventListener("exercise-solved", () => all.forEach(renderPipeline));
   }
 
+  // ------------------------------------------------------------ черновик
+  // <div class="sql-scratch" data-id="…"></div> — свободное поле для проб: та же демо-база, что у упражнений,
+  // код сохраняется сам при каждой правке. Запускается весь код или только выделенный кусок.
+  // «Закрепить» прижимает черновик к низу экрана, чтобы он был под рукой у любой задачи раздела.
+  const SCRATCH_PREFIX = "scratch:";
+  const SCRATCH_HINT = "-- Черновик: пробуйте здесь что угодно, код сохраняется сам.\n" +
+    "-- Ctrl+Enter — запустить (если выделить кусок — только его).\n\nSELECT 1 AS проба;";
+  const TABLES_SQL = `SELECT table_schema || '.' || table_name AS таблица,
+       string_agg(column_name || ' ' || data_type, ', ' ORDER BY ordinal_position) AS столбцы
+FROM information_schema.columns
+WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+GROUP BY table_schema, table_name
+ORDER BY 1`;
+
+  function setupScratch(el) {
+    const key = SCRATCH_PREFIX + location.pathname + ":" + (el.dataset.id || "main");
+    el.innerHTML =
+      '<div class="scratch-head"><span class="scratch-title">✏️ Черновик</span>' +
+      '<span class="scratch-note">демо-база страницы · сохраняется в этом браузере</span></div>' +
+      '<div class="highlight-sql notranslate"><div class="highlight"><pre></pre></div></div>' +
+      '<div class="runnable-bar">' +
+      '<button type="button" class="runnable-run" title="Ctrl+Enter. Если выделен кусок кода — запускается только он">▶ Запустить</button>' +
+      '<button type="button" class="scratch-tables" title="Какие таблицы и столбцы есть в демо-базе">📋 Таблицы</button>' +
+      '<button type="button" class="scratch-pin" title="Держать черновик внизу экрана">📌 Закрепить</button>' +
+      '<button type="button" class="scratch-clear" title="Стереть черновик">🗑 Очистить</button>' +
+      '<span class="runnable-saved" hidden>сохранено</span>' +
+      '<span class="runnable-lang">SQL · PostgreSQL</span></div>' +
+      '<div class="runnable-out" hidden></div>';
+    const pre = el.querySelector("pre");
+    const out = el.querySelector(".runnable-out");
+    const savedMark = el.querySelector(".runnable-saved");
+    pre.textContent = loadSaved(key) ?? SCRATCH_HINT;
+    pre.contentEditable = "plaintext-only";
+    pre.spellcheck = false;
+
+    let timer;
+    pre.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        savedMark.textContent = saveCode(key, pre.innerText) ? "сохранено" : "браузер не даёт сохранять";
+        savedMark.hidden = false;
+      }, 400);
+    });
+
+    const runBtn = el.querySelector(".runnable-run");
+    const exec = async (code) => {
+      runBtn.disabled = true;
+      out.hidden = false;
+      const status = (msg) => (out.innerHTML = `<span class="runnable-muted">${esc(msg)}</span>`);
+      try {
+        await runSql(code, out, status);
+      } catch (e) {
+        out.innerHTML = `<pre class="runnable-error">${esc(e.message || e)}</pre>`;
+      } finally {
+        runBtn.disabled = false;
+      }
+    };
+    const run = () => {
+      const sel = window.getSelection();
+      const picked = sel && !sel.isCollapsed && pre.contains(sel.anchorNode) && pre.contains(sel.focusNode)
+        ? sel.toString().trim() : "";
+      exec(picked || pre.innerText);
+    };
+    runBtn.addEventListener("click", run);
+    el.querySelector(".scratch-tables").addEventListener("click", () => exec(TABLES_SQL));
+
+    const pinBtn = el.querySelector(".scratch-pin");
+    pinBtn.addEventListener("click", () => {
+      const pinned = el.classList.toggle("scratch-pinned");
+      pinBtn.textContent = pinned ? "📌 Открепить" : "📌 Закрепить";
+    });
+
+    // Двойное нажатие вместо confirm(), как у сброса пайплайна
+    const clearBtn = el.querySelector(".scratch-clear");
+    clearBtn.addEventListener("click", () => {
+      if (!clearBtn.dataset.armed) {
+        clearBtn.dataset.armed = "1";
+        clearBtn.textContent = "Точно стереть? Нажмите ещё раз";
+        setTimeout(() => { delete clearBtn.dataset.armed; clearBtn.textContent = "🗑 Очистить"; }, 4000);
+        return;
+      }
+      delete clearBtn.dataset.armed;
+      clearBtn.textContent = "🗑 Очистить";
+      dropSaved(key);
+      pre.textContent = "";
+      savedMark.hidden = true;
+      out.hidden = true;
+      out.innerHTML = "";
+      pre.focus();
+    });
+
+    pre.addEventListener("keydown", (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+        e.preventDefault();
+        run();
+      } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();   // и так сохраняется само; не даём браузеру сохранять страницу
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        document.execCommand("insertText", false, "    ");
+      }
+    });
+  }
+
   function init() {
+    document.querySelectorAll(".sql-scratch").forEach(setupScratch);
     document.querySelectorAll(BLOCKS.sql).forEach((b) => {
       const pre = b.querySelector("pre");
       // textContent, а не innerText: решение лежит в свёрнутом блоке, у скрытого элемента innerText пустой
@@ -430,7 +535,7 @@ async def __run(code):
       if (m) solutions.set(m[1], pre.textContent);
     });
     for (const [lang, selector] of Object.entries(BLOCKS)) {
-      document.querySelectorAll(selector).forEach((b) => b.closest("article") && setup(b, lang));
+      document.querySelectorAll(selector).forEach((b) => b.closest("article") && !b.closest(".sql-scratch") && setup(b, lang));
     }
     initPipelines();
   }
