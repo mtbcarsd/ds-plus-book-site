@@ -488,10 +488,48 @@ ORDER BY 1`;
     runBtn.addEventListener("click", run);
     el.querySelector(".scratch-tables").addEventListener("click", () => exec(TABLES_SQL));
 
+    // Закреплённый черновик перетаскивается за заголовок; место запоминается в этом браузере
+    const posKey = key + ":pos";
+    const head = el.querySelector(".scratch-head");
+    const place = (x, y) => {
+      x = Math.min(Math.max(0, x), window.innerWidth - el.offsetWidth);
+      y = Math.min(Math.max(0, y), window.innerHeight - head.offsetHeight - 8);
+      el.classList.add("scratch-moved");
+      el.style.left = x + "px";
+      el.style.top = y + "px";
+      return [x, y];
+    };
     const pinBtn = el.querySelector(".scratch-pin");
     pinBtn.addEventListener("click", () => {
       const pinned = el.classList.toggle("scratch-pinned");
       pinBtn.textContent = pinned ? "📌 Открепить" : "📌 Закрепить";
+      head.title = pinned ? "Перетащите, чтобы подвинуть черновик" : "";
+      el.classList.remove("scratch-moved");
+      el.style.left = el.style.top = "";
+      const pos = pinned && loadSaved(posKey);
+      if (pos) place(...JSON.parse(pos));
+    });
+    head.addEventListener("pointerdown", (e) => {
+      if (!el.classList.contains("scratch-pinned") || e.button !== 0) return;
+      e.preventDefault();
+      const r = el.getBoundingClientRect();
+      const dx = e.clientX - r.left, dy = e.clientY - r.top;
+      let last;
+      head.setPointerCapture(e.pointerId);
+      const move = (ev) => { last = place(ev.clientX - dx, ev.clientY - dy); };
+      const up = () => {
+        head.removeEventListener("pointermove", move);
+        head.removeEventListener("pointerup", up);
+        head.removeEventListener("pointercancel", up);
+        if (last) saveCode(posKey, JSON.stringify(last));
+      };
+      head.addEventListener("pointermove", move);
+      head.addEventListener("pointerup", up);
+      head.addEventListener("pointercancel", up);
+    });
+    // после поворота телефона или сужения окна возвращаем черновик в пределы экрана
+    window.addEventListener("resize", () => {
+      if (el.classList.contains("scratch-moved")) { const r = el.getBoundingClientRect(); place(r.left, r.top); }
     });
 
     // Двойное нажатие вместо confirm(), как у сброса пайплайна
