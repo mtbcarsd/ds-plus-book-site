@@ -157,6 +157,70 @@ async def __run(code):
     }
   }
 
+  // ------------------------------------------------------------ подсветка SQL при редактировании
+  // CSS Custom Highlight API красит диапазоны текста, не трогая DOM: курсор, выделение и Ctrl+Z работают как обычно.
+  // Цвета — как у Pygments на странице (::highlight в runnable.css). Без поддержки API остаётся подсветка Pygments.
+  const HL = typeof CSS !== "undefined" && CSS.highlights && typeof Highlight === "function";
+  const words = (s) => new Set(s.split(/\s+/));
+  const SQL_KW = words(`select from where group by having order limit offset fetch as on join inner left right full outer
+    cross natural using and or not is null in between like ilike similar exists case when then else end distinct all union
+    intersect except with recursive insert into values update set delete create table view drop alter add column primary
+    key foreign references default true false asc desc nulls first last filter over partition window rows range unbounded
+    preceding following current row interval cast if replace temp temporary schema index unique check constraint
+    returning lateral any some`);
+  const SQL_TYPES = words(`int integer bigint smallint numeric decimal real float double precision text varchar char
+    character varying boolean bool date time timestamp timestamptz serial bigserial json jsonb uuid`);
+  // комментарий | строка | "имя" | число | слово (+ признак «дальше скобка» — функция) | оператор
+  const SQL_TOKEN = /(--[^\n]*|\/\*[\s\S]*?(?:\*\/|$))|('(?:[^']|'')*'?)|("(?:[^"]|"")*"?)|(\b\d+(?:\.\d+)?(?:e[+-]?\d+)?\b)|([A-Za-zА-Яа-яЁё_][\wА-Яа-яЁё$]*)(?=(\s*\()?)|([<>=!|:+\-*/%^~]+)/gi;
+  const hlRanges = new Map();   // pre → Map(класс → [Range])
+
+  function highlightSql(pre) {
+    // Enter в редактируемом блоке вставляет <br>, а не «\n»: считаем его переводом строки
+    const nodes = [], starts = [];
+    let text = "";
+    const walker = document.createTreeWalker(pre, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+    for (let n; (n = walker.nextNode()); ) {
+      if (n.nodeType === Node.TEXT_NODE) { nodes.push(n); starts.push(text.length); text += n.data; }
+      else if (n.nodeName === "BR") { nodes.push(n); starts.push(text.length); text += "\n"; }
+    }
+    const at = (pos) => {   // позиция в тексте → [узел, смещение] для Range
+      let i = starts.length - 1;
+      while (i > 0 && starts[i] > pos) i--;
+      const n = nodes[i];
+      if (n.nodeType === Node.TEXT_NODE) return [n, pos - starts[i]];
+      const k = [...n.parentNode.childNodes].indexOf(n);
+      return [n.parentNode, pos > starts[i] ? k + 1 : k];
+    };
+    for (const [cls, list] of hlRanges.get(pre) || []) list.forEach((r) => CSS.highlights.get(cls).delete(r));
+    const fresh = new Map();
+    for (const m of text.matchAll(SQL_TOKEN)) {
+      let cls = null;
+      if (m[1]) cls = "sql-c";
+      else if (m[2]) cls = "sql-s";
+      else if (m[4]) cls = "sql-m";
+      else if (m[5]) {
+        const w = m[5].toLowerCase();
+        cls = SQL_KW.has(w) ? "sql-k" : SQL_TYPES.has(w) ? "sql-t" : m[6] ? "sql-f" : null;
+      } else if (m[7]) cls = "sql-o";
+      if (!cls) continue;
+      const r = new Range();
+      r.setStart(...at(m.index));
+      r.setEnd(...at(m.index + m[0].length));
+      if (!CSS.highlights.has(cls)) CSS.highlights.set(cls, new Highlight());
+      CSS.highlights.get(cls).add(r);
+      if (!fresh.has(cls)) fresh.set(cls, []);
+      fresh.get(cls).push(r);
+    }
+    hlRanges.set(pre, fresh);
+  }
+  // Убираем статичные span'ы Pygments и перекрашиваем при любой смене текста: ввод, сброс, сборка блоков
+  function liveHighlight(pre) {
+    if (!HL) return;
+    pre.textContent = pre.textContent;
+    highlightSql(pre);
+    new MutationObserver(() => highlightSql(pre)).observe(pre, { childList: true, characterData: true, subtree: true });
+  }
+
   // ------------------------------------------------------------ упражнения
   // Блок с первой строкой «-- упражнение: id» получает кнопку «Проверить»: запрос пользователя и блок
   // «-- решение: id» выполняются на одной базе, результаты сравниваются (порядок строк — если в решении ORDER BY).
@@ -291,6 +355,7 @@ async def __run(code):
     if (saved !== null) pre.textContent = saved;
     pre.contentEditable = "plaintext-only";
     pre.spellcheck = false;
+    if (lang === "sql") liveHighlight(pre);
     pre.title = "Код можно редактировать. Ctrl+Enter — запустить, Ctrl+S — сохранить";
 
     const bar = document.createElement("div");
@@ -369,7 +434,7 @@ async def __run(code):
     bar.querySelector(".runnable-reset").addEventListener("click", () => {
       dropSaved(key);
       savedMark.hidden = true;
-      pre.innerHTML = original;
+      if (HL && lang === "sql") pre.textContent = source; else pre.innerHTML = original;
       out.hidden = true;
       out.innerHTML = "";
     });
@@ -457,6 +522,7 @@ ORDER BY 1`;
     pre.textContent = loadSaved(key) ?? SCRATCH_HINT;
     pre.contentEditable = "plaintext-only";
     pre.spellcheck = false;
+    liveHighlight(pre);
 
     let timer;
     pre.addEventListener("input", () => {
