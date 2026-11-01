@@ -449,7 +449,8 @@ ORDER BY 1`;
       '<button type="button" class="scratch-clear" title="Стереть черновик">🗑 Очистить</button>' +
       '<span class="runnable-saved" hidden>сохранено</span>' +
       '<span class="runnable-lang">SQL · PostgreSQL</span></div>' +
-      '<div class="runnable-out" hidden></div>';
+      '<div class="runnable-out" hidden></div>' +
+      '<span class="scratch-resize" title="Потяните, чтобы изменить размер"></span>';
     const pre = el.querySelector("pre");
     const out = el.querySelector(".runnable-out");
     const savedMark = el.querySelector(".runnable-saved");
@@ -488,9 +489,11 @@ ORDER BY 1`;
     runBtn.addEventListener("click", run);
     el.querySelector(".scratch-tables").addEventListener("click", () => exec(TABLES_SQL));
 
-    // Закреплённый черновик перетаскивается за заголовок; место запоминается в этом браузере
-    const posKey = key + ":pos";
+    // Закреплённый черновик перетаскивается за заголовок и тянется за угол;
+    // место и размер запоминаются в этом браузере
+    const posKey = key + ":pos", sizeKey = key + ":size";
     const head = el.querySelector(".scratch-head");
+    const grip = el.querySelector(".scratch-resize");
     const place = (x, y) => {
       x = Math.min(Math.max(0, x), window.innerWidth - el.offsetWidth);
       y = Math.min(Math.max(0, y), window.innerHeight - head.offsetHeight - 8);
@@ -499,36 +502,61 @@ ORDER BY 1`;
       el.style.top = y + "px";
       return [x, y];
     };
+    const resize = (w, h) => {
+      const r = el.getBoundingClientRect();
+      w = Math.max(Math.min(280, window.innerWidth), Math.min(w, window.innerWidth - r.left));
+      h = Math.max(Math.min(200, window.innerHeight), Math.min(h, window.innerHeight - r.top));
+      el.classList.add("scratch-sized");
+      el.style.width = w + "px";
+      el.style.height = h + "px";
+      return [w, h];
+    };
+    // Тянем мышью или пальцем: onMove получает смещение от точки нажатия, его результат сохраняется в storeKey
+    function draggable(handle, onStart, onMove, store) {
+      handle.addEventListener("pointerdown", (e) => {
+        if (!el.classList.contains("scratch-pinned") || e.button !== 0) return;
+        e.preventDefault();
+        onStart();
+        const r = el.getBoundingClientRect();
+        const x0 = e.clientX, y0 = e.clientY;
+        let last;
+        handle.setPointerCapture(e.pointerId);
+        const move = (ev) => { last = onMove(r, ev.clientX - x0, ev.clientY - y0); };
+        const up = () => {
+          handle.removeEventListener("pointermove", move);
+          handle.removeEventListener("pointerup", up);
+          handle.removeEventListener("pointercancel", up);
+          if (last) saveCode(store, JSON.stringify(last));
+        };
+        handle.addEventListener("pointermove", move);
+        handle.addEventListener("pointerup", up);
+        handle.addEventListener("pointercancel", up);
+      });
+    }
+    // из положения «внизу по центру» переходим к явным координатам, чтобы угол оставался под пальцем
+    const anchor = () => {
+      if (el.classList.contains("scratch-moved")) return;
+      const r = el.getBoundingClientRect();
+      place(r.left, r.top);
+    };
+    draggable(head, () => {}, (r, dx, dy) => place(r.left + dx, r.top + dy), posKey);
+    draggable(grip, anchor, (r, dx, dy) => resize(r.width + dx, r.height + dy), sizeKey);
+
     const pinBtn = el.querySelector(".scratch-pin");
     pinBtn.addEventListener("click", () => {
       const pinned = el.classList.toggle("scratch-pinned");
       pinBtn.textContent = pinned ? "📌 Открепить" : "📌 Закрепить";
       head.title = pinned ? "Перетащите, чтобы подвинуть черновик" : "";
-      el.classList.remove("scratch-moved");
-      el.style.left = el.style.top = "";
-      const pos = pinned && loadSaved(posKey);
+      el.classList.remove("scratch-moved", "scratch-sized");
+      el.style.left = el.style.top = el.style.width = el.style.height = "";
+      if (!pinned) return;
+      const pos = loadSaved(posKey), size = loadSaved(sizeKey);
       if (pos) place(...JSON.parse(pos));
-    });
-    head.addEventListener("pointerdown", (e) => {
-      if (!el.classList.contains("scratch-pinned") || e.button !== 0) return;
-      e.preventDefault();
-      const r = el.getBoundingClientRect();
-      const dx = e.clientX - r.left, dy = e.clientY - r.top;
-      let last;
-      head.setPointerCapture(e.pointerId);
-      const move = (ev) => { last = place(ev.clientX - dx, ev.clientY - dy); };
-      const up = () => {
-        head.removeEventListener("pointermove", move);
-        head.removeEventListener("pointerup", up);
-        head.removeEventListener("pointercancel", up);
-        if (last) saveCode(posKey, JSON.stringify(last));
-      };
-      head.addEventListener("pointermove", move);
-      head.addEventListener("pointerup", up);
-      head.addEventListener("pointercancel", up);
+      if (size) { anchor(); resize(...JSON.parse(size)); }
     });
     // после поворота телефона или сужения окна возвращаем черновик в пределы экрана
     window.addEventListener("resize", () => {
+      if (el.classList.contains("scratch-sized")) { const r = el.getBoundingClientRect(); resize(r.width, r.height); }
       if (el.classList.contains("scratch-moved")) { const r = el.getBoundingClientRect(); place(r.left, r.top); }
     });
 

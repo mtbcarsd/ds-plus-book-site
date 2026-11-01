@@ -83,10 +83,25 @@ div[data-runnable] { margin-bottom: 0 !important; }
 .sql-scratch .runnable-table { max-height: 16rem; }
 .sql-scratch.scratch-pinned {
   position: fixed; left: 50%; bottom: 0; transform: translateX(-50%); z-index: 1050;
-  width: min(60rem, 100vw - 1rem); max-height: 70vh; overflow-y: auto; margin: 0;
+  width: min(60rem, 100vw - 1rem); max-height: 70vh; overflow: hidden; margin: 0;
+  display: flex; flex-direction: column;
   border-style: solid; border-bottom: 0; border-radius: .6rem .6rem 0 0; box-shadow: 0 -4px 18px rgba(0, 0, 0, .25);
 }
-.sql-scratch.scratch-pinned pre { min-height: 5rem; max-height: 14rem; }
+/* В закреплённом виде поле кода занимает свободное место, результат прокручивается сам */
+.sql-scratch.scratch-pinned > .highlight-sql { flex: 1 1 auto; min-height: 4rem; display: flex; margin: 0; }
+.sql-scratch.scratch-pinned > .highlight-sql > .highlight { flex: 1; display: flex; min-height: 0; margin: 0; }
+.sql-scratch.scratch-pinned pre { flex: 1; min-height: 4rem; max-height: 14rem; }
+.sql-scratch.scratch-pinned .runnable-bar { flex: none; }
+.sql-scratch.scratch-pinned .runnable-out { flex: 0 1 auto; min-height: 0; overflow: auto; }
+.sql-scratch.scratch-sized { max-height: none; }
+.sql-scratch.scratch-sized pre { max-height: none; }
+.scratch-resize { display: none; }
+.sql-scratch.scratch-pinned .scratch-resize {
+  display: block; position: absolute; right: 0; bottom: 0; width: 22px; height: 22px;
+  cursor: nwse-resize; touch-action: none;
+  background: linear-gradient(135deg, transparent 50%, #e0a030 50%, #e0a030 60%, transparent 60%,
+                              transparent 70%, #e0a030 70%, #e0a030 80%, transparent 80%);
+}
 .sql-scratch.scratch-pinned .scratch-head { cursor: move; touch-action: none; user-select: none; }
 .sql-scratch.scratch-pinned .scratch-head::after { content: "⠿ перетащите"; margin-left: auto; font-size: .8rem; color: var(--pst-color-text-muted, #777); }
 .sql-scratch.scratch-moved {
