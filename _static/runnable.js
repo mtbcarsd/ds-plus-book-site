@@ -52,49 +52,105 @@ def __figs():
 async def __run(code):
     from pyodide.code import eval_code_async
     if "matplotlib" in code or "seaborn" in code:
-        import matplotlib
+        import matplotlib, warnings
         matplotlib.use("Agg")
+        warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")  # графики забирает __figs
     result = await eval_code_async(code, globals())
     return __show(result), __figs()
 `;
-  let pyReady;
-  function getPython(status) {
-    return (pyReady ??= (async () => {
-      status("Загружаю Python (≈10 МБ, только при первом запуске)…");
-      await loadScript(PYODIDE + "pyodide.js");
-      const py = await globalThis.loadPyodide({ indexURL: PYODIDE });
-      py.runPython(PY_HELPERS);
-      return py;
-    })());
+  // Python работает в отдельном потоке: долгий расчёт не подвешивает страницу, и его можно прервать
+  const PY_WORKER = `
+importScripts(${JSON.stringify(PYODIDE + "pyodide.js")});
+const ready = (async () => {
+  const py = await loadPyodide({ indexURL: ${JSON.stringify(PYODIDE)} });
+  py.runPython(${JSON.stringify(PY_HELPERS)});
+  const line = (s) => postMessage({ line: s });
+  py.setStdout({ batched: line });
+  py.setStderr({ batched: line });
+  return py;
+})();
+onmessage = async ({ data: { code, files } }) => {
+  try {
+    const py = await ready;
+    for (const [name, text] of Object.entries(files || {})) py.FS.writeFile(name, text);
+    postMessage({ status: "Загружаю пакеты…" });
+    await py.loadPackagesFromImports(code, { messageCallback: () => {} });
+    postMessage({ status: "Выполняю…" });
+    const res = await py.globals.get("__run")(code);
+    const [shown, figs] = res.toJs();
+    res.destroy();
+    postMessage({ done: true, shown, figs });
+  } catch (e) {
+    postMessage({ done: true, error: String(e.message || e) });
+  }
+};
+`;
+  const STOPPED = "Остановлено. Переменные сброшены: запустите нужные блоки выше заново.";
+  let pyWorker = null, pyJob = null, pyQueue = Promise.resolve();
+
+  // Файлы страницы: <script type="text/plain" class="py-data" data-file="имя.csv"> — шифруются вместе с HTML
+  function pageFiles() {
+    const files = {};
+    document.querySelectorAll("script.py-data[data-file]").forEach((el) => (files[el.dataset.file] = el.textContent.trim() + "\n"));
+    return files;
   }
 
-  async function runPython(code, out, status) {
-    const py = await getPython(status);
-    status("Загружаю пакеты…");
-    await py.loadPackagesFromImports(code);
-    const lines = [];
-    py.setStdout({ batched: (s) => lines.push(s) });
-    py.setStderr({ batched: (s) => lines.push(s) });
-    status("Выполняю…");
-    let html = "";
-    try {
-      const res = await py.globals.get("__run")(code);
-      const [shown, figs] = res.toJs();
-      res.destroy();
-      if (lines.length) html += `<pre class="runnable-text">${esc(lines.join("\n"))}</pre>`;
-      if (shown) {
-        const [kind, value] = shown;
-        html += kind === "html" ? `<div class="runnable-html">${value}</div>` : `<pre class="runnable-text">${esc(value)}</pre>`;
+  function stopPython() {
+    if (!pyJob) return;
+    pyWorker.terminate();
+    pyWorker = null;
+    pyJob.reject(new Error(STOPPED));
+  }
+
+  function execPython(code, onMessage) {
+    return new Promise((resolve, reject) => {
+      let files;
+      if (!pyWorker) {
+        pyWorker = new Worker(URL.createObjectURL(new Blob([PY_WORKER], { type: "text/javascript" })));
+        files = pageFiles();
       }
-      for (const png of figs) html += `<img class="runnable-fig" src="data:image/png;base64,${png}" alt="график">`;
-    } catch (e) {
-      if (lines.length) html += `<pre class="runnable-text">${esc(lines.join("\n"))}</pre>`;
-      // Отрезаем служебные кадры Pyodide, оставляем трейсбек пользовательского кода
-      const msg = String(e.message || e);
-      const i = msg.search(/File "<exec>", line \d+, in <module>/);
-      html += `<pre class="runnable-error">${esc(i >= 0 ? "Traceback:\n  " + msg.slice(i) : msg)}</pre>`;
-    }
-    out.innerHTML = html || '<span class="runnable-muted">Готово, вывода нет.</span>';
+      pyJob = { reject };
+      pyWorker.onerror = (e) => {
+        pyWorker.terminate();
+        pyWorker = null;
+        reject(new Error("Не удалось запустить Python: " + (e.message || "ошибка потока")));
+      };
+      pyWorker.onmessage = ({ data }) => (data.done ? resolve(data) : onMessage(data));
+      pyWorker.postMessage({ code, files });
+    }).finally(() => (pyJob = null));
+  }
+
+  function runPython(code, out, status) {
+    const job = async () => {
+      if (!pyWorker) status("Загружаю Python (≈10 МБ, только при первом запуске)…");
+      const lines = [];
+      const text = () => `<pre class="runnable-text">${esc(lines.join("\n"))}</pre>`;
+      const { shown, figs = [], error } = await execPython(code, ({ line, status: s }) => {
+        if (s) status(s);
+        if (line !== undefined) {
+          lines.push(line);
+          out.innerHTML = text();
+        }
+      });
+      let html = lines.length ? text() : "";
+      if (error) {
+        // Отрезаем служебные кадры Pyodide, оставляем трейсбек пользовательского кода
+        const i = error.search(/File "<exec>", line \d+, in <module>/);
+        html += `<pre class="runnable-error">${esc(i >= 0 ? "Traceback:\n  " + error.slice(i) : error)}</pre>`;
+      } else {
+        if (shown) {
+          const [kind, value] = shown;
+          html += kind === "html" ? `<div class="runnable-html">${value}</div>` : `<pre class="runnable-text">${esc(value)}</pre>`;
+        }
+        for (const png of figs) html += `<img class="runnable-fig" src="data:image/png;base64,${png}" alt="график">`;
+      }
+      out.innerHTML = html || '<span class="runnable-muted">Готово, вывода нет.</span>';
+    };
+    if (pyJob) status("Жду окончания предыдущего блока…");
+    // Блоки выполняются по очереди, как ячейки ноутбука
+    const result = pyQueue.then(job);
+    pyQueue = result.catch(() => {});
+    return result;
   }
 
   // ------------------------------------------------------------ SQL
@@ -362,6 +418,7 @@ async def __run(code):
     bar.className = "runnable-bar";
     bar.innerHTML =
       `<button type="button" class="runnable-run">▶ Запустить</button>` +
+      (lang === "python" ? `<button type="button" class="runnable-stop" title="Прервать расчёт (переменные сбросятся)" hidden>■ Стоп</button>` : "") +
       `<button type="button" class="runnable-save" title="Запомнить код в этом браузере">💾 Сохранить</button>` +
       `<button type="button" class="runnable-reset" title="Вернуть исходный код и удалить сохранённое">↺ Сбросить</button>` +
       `<span class="runnable-saved"${saved !== null ? "" : " hidden"}>сохранено</span>` +
@@ -380,8 +437,11 @@ async def __run(code):
     block.after(bar, out);
 
     const runBtn = bar.querySelector(".runnable-run");
+    const stopBtn = bar.querySelector(".runnable-stop");
+    if (stopBtn) stopBtn.addEventListener("click", stopPython);
     const run = async () => {
       runBtn.disabled = true;
+      if (stopBtn) stopBtn.hidden = false;
       out.hidden = false;
       const status = (msg) => (out.innerHTML = `<span class="runnable-muted">${esc(msg)}</span>`);
       try {
@@ -391,6 +451,7 @@ async def __run(code):
         out.innerHTML = `<pre class="runnable-error">${esc(e.message || e)}</pre>`;
       } finally {
         runBtn.disabled = false;
+        if (stopBtn) stopBtn.hidden = true;
       }
     };
     runBtn.addEventListener("click", run);
